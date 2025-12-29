@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Esqueleto Virtual AI</title>
+    
+    <!-- Importar librerías de MediaPipe -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+
+    <!-- Tailwind CSS para diseño -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <style>
+        body {
+            background-color: #111;
+            margin: 0;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: sans-serif;
+        }
+
+        .container {
+            position: relative;
+            box-shadow: 0 0 50px rgba(255, 0, 0, 0.2);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .input_video {
+            display: none;
+        }
+
+        .output_canvas {
+            display: block;
+            max-width: 100vw;
+            max-height: 100vh;
+        }
+
+        .loading-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            z-index: 10;
+            transition: opacity 0.5s;
+        }
+
+        /* Estilo del spinner */
+        .bone-spinner {
+            width: 50px;
+            height: 50px;
+            border: 5px solid #333;
+            border-top: 5px solid #fff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .title {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            text-shadow: 2px 2px 4px black;
+            z-index: 5;
+            background: rgba(0,0,0,0.5);
+            padding: 10px 20px;
+            border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <!-- Título superpuesto -->
+        <div class="title">
+            <h1 class="text-xl font-bold uppercase tracking-widest">Modo Esqueleto</h1>
+            <p class="text-xs text-gray-300">Anatomía en tiempo real</p>
+        </div>
+
+        <!-- Pantalla de carga -->
+        <div id="loading" class="loading-overlay">
+            <div class="bone-spinner"></div>
+            <p class="mt-4 text-sm tracking-widest uppercase">Calibrando Sensores...</p>
+        </div>
+
+        <!-- Video input (oculto) y Canvas de salida -->
+        <video class="input_video"></video>
+        <canvas class="output_canvas"></canvas>
+    </div>
+
+    <script>
+        const videoElement = document.getElementsByClassName('input_video')[0];
+        const canvasElement = document.getElementsByClassName('output_canvas')[0];
+        const ctx = canvasElement.getContext('2d');
+        const loadingScreen = document.getElementById('loading');
+
+        // --- Definición de Anatomía ---
+        // Definimos pares de puntos para dibujar los "huesos"
+        const BONES = [
+            // Torso
+            [11, 12], // Clavícula (Hombro a Hombro)
+            [11, 23], [12, 24], // Costados
+            [23, 24], // Cadera
+
+            // Brazo Derecho
+            [12, 14], // Húmero
+            [14, 16], // Radio/Cúbito
+            
+            // Brazo Izquierdo
+            [11, 13], // Húmero
+            [13, 15], // Radio/Cúbito
+
+            // Manos (Básico)
+            [16, 18], [16, 20], [16, 22], // Mano Der
+            [15, 17], [15, 19], [15, 21], // Mano Izq
+
+            // Pierna Derecha
+            [24, 26], // Fémur
+            [26, 28], // Tibia/Peroné
+            [28, 30], [28, 32], // Pie
+
+            // Pierna Izquierda
+            [23, 25], // Fémur
+            [25, 27], // Tibia/Peroné
+            [27, 29], [27, 31]  // Pie
+        ];
+
+        // Definimos qué puntos son articulaciones principales para los círculos rojos
+        const JOINTS = [
+            11, 12, // Hombros
+            13, 14, // Codos
+            15, 16, // Muñecas
+            23, 24, // Caderas
+            25, 26, // Rodillas
+            27, 28  // Tobillos
+        ];
+
+        // Etiquetas para los huesos (Indices de inicio y fin, y el nombre)
+        const BONE_LABELS = [
+            { start: 11, end: 12, text: "Clavícula" },
+            { start: 12, end: 14, text: "Húmero" },   // Brazo Der
+            { start: 11, end: 13, text: "Húmero" },   // Brazo Izq
+            { start: 14, end: 16, text: "Radio" },    // Antebrazo Der
+            { start: 13, end: 15, text: "Radio" },    // Antebrazo Izq
+            { start: 24, end: 26, text: "Fémur" },    // Muslo Der
+            { start: 23, end: 25, text: "Fémur" },    // Muslo Izq
+            { start: 26, end: 28, text: "Tibia" },    // Pierna Der
+            { start: 25, end: 27, text: "Tibia" }     // Pierna Izq
+        ];
+
+        function onResults(results) {
+            // Ocultar carga
+            if(loadingScreen.style.opacity !== '0') {
+                loadingScreen.style.opacity = '0';
+                setTimeout(() => loadingScreen.style.display = 'none', 500);
+            }
+
+            // Ajustar canvas
+            canvasElement.width = videoElement.videoWidth;
+            canvasElement.height = videoElement.videoHeight;
+            const w = canvasElement.width;
+            const h = canvasElement.height;
+
+            // 1. Dibujar el video base (Espejo)
+            ctx.save();
+            ctx.clearRect(0, 0, w, h);
+            ctx.translate(w, 0);
+            ctx.scale(-1, 1);
+            
+            // Filtro oscuro para que resalte el esqueleto (opcional)
+            ctx.filter = 'brightness(60%) contrast(110%)'; 
+            ctx.drawImage(results.image, 0, 0, w, h);
+            ctx.filter = 'none';
+
+            if (results.poseLandmarks) {
+                const landmarks = results.poseLandmarks;
+
+                // Configuración de estilo de huesos
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+
+                // 2. Dibujar HUESOS (Líneas blancas gruesas)
+                ctx.lineWidth = 12; // Grosor del hueso
+                ctx.strokeStyle = '#FFFFFF'; // Color hueso
+                
+                BONES.forEach(pair => {
+                    const start = landmarks[pair[0]];
+                    const end = landmarks[pair[1]];
+
+                    // Solo dibujar si ambos puntos tienen buena visibilidad
+                    if(start.visibility > 0.5 && end.visibility > 0.5) {
+                        ctx.beginPath();
+                        ctx.moveTo(start.x * w, start.y * h);
+                        ctx.lineTo(end.x * w, end.y * h);
+                        ctx.stroke();
+                    }
+                });
+
+                // 3. Dibujar ARTICULACIONES (Círculos rojos)
+                JOINTS.forEach(index => {
+                    const joint = landmarks[index];
+                    
+                    if(joint.visibility > 0.5) {
+                        const x = joint.x * w;
+                        const y = joint.y * h;
+
+                        ctx.beginPath();
+                        ctx.arc(x, y, 10, 0, 2 * Math.PI); // Radio 10
+                        ctx.fillStyle = '#FF0000'; // Rojo puro
+                        ctx.fill();
+                        
+                        // Brillo blanco pequeño para efecto 3D
+                        ctx.beginPath();
+                        ctx.arc(x - 3, y - 3, 3, 0, 2 * Math.PI);
+                        ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+                        ctx.fill();
+                    }
+                });
+
+                // 4. Dibujar NOMBRES (Etiquetas)
+                ctx.font = "bold 16px sans-serif";
+                ctx.fillStyle = "#00ffcc"; // Color cian para el texto
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+
+                BONE_LABELS.forEach(label => {
+                    const start = landmarks[label.start];
+                    const end = landmarks[label.end];
+
+                    if (start.visibility > 0.5 && end.visibility > 0.5) {
+                        // Calcular punto medio del hueso
+                        const midX = (start.x + end.x) / 2 * w;
+                        const midY = (start.y + end.y) / 2 * h;
+
+                        ctx.save();
+                        // Moverse al punto medio
+                        ctx.translate(midX, midY);
+                        // Invertir escala X para que el texto no salga al revés (por el efecto espejo del video)
+                        ctx.scale(-1, 1); 
+                        
+                        // Sombra negra para legibilidad
+                        ctx.shadowColor = "black";
+                        ctx.shadowBlur = 4;
+                        ctx.lineWidth = 3;
+                        ctx.strokeText(label.text, 0, 0);
+                        
+                        ctx.fillText(label.text, 0, 0);
+                        ctx.restore();
+                    }
+                });
+            }
+
+            ctx.restore();
+        }
+
+        // --- Inicialización ---
+        const pose = new Pose({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+        }});
+
+        pose.setOptions({
+            modelComplexity: 1,
+            smoothLandmarks: true,
+            enableSegmentation: false,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        pose.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await pose.send({image: videoElement});
+            },
+            width: 1280,
+            height: 720
+        });
+
+        camera.start();
+    </script>
+</body>
+</html>
